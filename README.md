@@ -78,7 +78,7 @@ observation and spatial metadata.
 ## Input requirements
 
 - Inputs are `AnnData` objects with unique observation and gene names.
-- `adata_st.obsm["spatial"]` contains finite 2-D or 3-D coordinates.
+- `adata_st.obsm["spatial"]` contains finite 2-D coordinates.
 - Expression values are finite and non-negative.
 - In `missing_gene` mode, ST and scRNA-seq matrices use the same transformation
   and share at least two non-target genes.
