@@ -1,0 +1,7 @@
+/.venv-build/
+/build/
+/build_check/
+/dist/
+/src/*.egg-info/
+**/__pycache__/
+*.py[cod]

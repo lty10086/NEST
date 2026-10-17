@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nest-st"
+version = "0.2.0"
+description = "NEST: Native Expression reconstruction for Spatial Transcriptomics"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [
+  { name = "Tianyi Liu", email = "1694414073@qq.com" },
+]
+keywords = [
+  "spatial transcriptomics",
+  "gene completion",
+  "dropout recovery",
+  "graph neural network",
+  "single-cell RNA sequencing",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering :: Bio-Informatics",
+]
+dependencies = [
+  "anndata>=0.10",
+  "numpy>=1.24",
+  "pandas>=2.0",
+  "scanpy>=1.10",
+  "scikit-learn>=1.3",
+  "scipy>=1.10",
+  "torch>=2.1",
+  "torch-geometric>=2.5",
+  "igraph>=0.11",
+  "leidenalg>=0.10",
+]
+
+[project.urls]
+Homepage = "https://github.com/lty10086/NEST"
+Repository = "https://github.com/lty10086/NEST"
+Issues = "https://github.com/lty10086/NEST/issues"
+
+[project.scripts]
+nest-st = "nest_st.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+
