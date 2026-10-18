@@ -83,6 +83,10 @@ observation and spatial metadata.
 - In `missing_gene` mode, ST and scRNA-seq matrices use the same transformation
   and share at least two non-target genes.
 
+## Data Availability
+The processed datasets and benchmark materials supporting this study are
+available on Zenodo at \url{[https://doi.org/10.5281/zenodo.XXXXXXXX](https://zenodo.org/records/23438059?preview=1&token=eyJhbGciOiJIUzUxMiIsImlhdCI6MTc5MjMyMTYzMCwiZXhwIjoxODExNjM1MTk5fQ.eyJpZCI6IjUwNmJmOTQ2LWMyZjAtNGM5MC1hOTdiLTk4YTcwMWJiZmY2NyIsImRhdGEiOnt9LCJyYW5kb20iOiI4NTJjMTljNmVkMWRiZWFlNzMxNmE2NDlhM2U3Y2VhYyJ9.-7ldL-JuTKA23Y8AFmUa-CkUivU7HXwsr0non5m9SbxNOPwbxXKrJcII5WzlyD9CS7RUqqBpPtb99aG8vyz9Qw)}.
+
 ## Development build
 
 ```bash
