@@ -1,94 +1,144 @@
-# Publishing `nest-st`
+# Publishing `nest-st` 0.2.1
 
-The distribution name `nest-st` already has release `0.1.0` on PyPI, so this
-package is versioned as `0.2.0`. PyPI does not allow a released version number
-to be reused.
+PyPI release numbers cannot be reused. Version `0.2.0` is already published,
+so this source tree uses `0.2.1` in both `pyproject.toml` and
+`src/nest_st/__init__.py`.
 
-## 1. Work in a clean environment
+The commands below are written for **Anaconda Prompt / Windows CMD**, not
+PowerShell. The example source directory is:
 
-From this directory:
+```text
+F:\NEST\raw_code\nest_st_package
+```
 
-```powershell
-py -m venv .venv-build
-.\.venv-build\Scripts\Activate.ps1
+## 1. Create a clean release environment
+
+No pre-existing `nest_clean` environment is required:
+
+```bat
+conda create -n nest_release python=3.11 -y
+conda activate nest_release
+cd /d F:\NEST\raw_code\nest_st_package
 python -m pip install --upgrade pip build twine
 ```
 
-The build environment does not need PyTorch or the scientific runtime because
-building reads metadata without importing `nest_st`.
+Building and checking distributions do not import the scientific runtime, so
+PyTorch and Scanpy are not required in this release-only environment.
 
-## 2. Build and inspect the distributions
+## 2. Remove old generated artifacts and build
 
-Remove artifacts from an older local build, then create a source archive and a
-wheel:
+```bat
+cd /d F:\NEST\raw_code\nest_st_package
+if exist build rmdir /s /q build
+if exist build_check rmdir /s /q build_check
+if exist dist rmdir /s /q dist
+if exist src\nest_st.egg-info rmdir /s /q src\nest_st.egg-info
 
-```powershell
-Remove-Item -Recurse -Force .\dist -ErrorAction SilentlyContinue
+python -m compileall -q src\nest_st
 python -m build
-python -m twine check .\dist\*
+python -m twine check dist\*
+dir dist
 ```
 
-The expected files are:
+Expected files:
 
 ```text
-dist/nest_st-0.2.0-py3-none-any.whl
-dist/nest_st-0.2.0.tar.gz
+dist\nest_st-0.2.1-py3-none-any.whl
+dist\nest_st-0.2.1.tar.gz
 ```
-
-Before a real release, install the wheel in the same type of CPU or CUDA
-environment used for NEST and run a small `missing_gene` and `dropout` example.
 
 ## 3. Optional TestPyPI rehearsal
 
-TestPyPI and PyPI use separate accounts and tokens. Upload with:
+TestPyPI and PyPI use different accounts and tokens. Specifying the upload URL
+directly avoids requiring a `testpypi` section in `%USERPROFILE%\.pypirc`:
 
-```powershell
-python -m twine upload --repository testpypi .\dist\*
+```bat
+python -m twine upload --repository-url https://test.pypi.org/legacy/ dist\*
 ```
 
-When prompted, use `__token__` as the username and paste the complete TestPyPI
-token (including its `pypi-` prefix) as the password. Because TestPyPI does not
-mirror every scientific dependency, validate the uploaded artifact without
-dependency resolution:
+Use `__token__` as the username and the complete TestPyPI token as the
+password. Check the uploaded artifact without resolving scientific dependencies:
 
-```powershell
-python -m pip install --index-url https://test.pypi.org/simple/ --no-deps nest-st==0.2.0
+```bat
+python -m pip install --index-url https://test.pypi.org/simple/ --no-deps nest-st==0.2.1
+python -c "import importlib.metadata as m; print(m.version('nest-st'))"
 ```
 
-## 4. Publish to PyPI
+## 4. Publish to PyPI manually
 
-Create a project-scoped token for `nest-st` in the PyPI project settings, then:
+If GitHub Trusted Publishing is not configured, upload with a project-scoped
+PyPI token:
 
-```powershell
-python -m twine upload .\dist\*
+```bat
+python -m twine upload --repository-url https://upload.pypi.org/legacy/ dist\*
 ```
 
-Use `__token__` as the username and the full PyPI token as the password. Do not
-commit a token or store it in this project.
+Use `__token__` as the username and the complete PyPI token as the password.
+Never store a token in this repository.
 
-## 5. Verify the public release
+Verify the release in a new runtime environment:
 
-In a fresh runtime environment:
-
-```powershell
-python -m pip install --upgrade nest-st==0.2.0
+```bat
+conda create -n nest_verify python=3.11 -y
+conda activate nest_verify
+python -m pip install nest-st==0.2.1
 python -c "import nest_st; print(nest_st.__version__)"
 nest-st --help
 ```
 
-For the next release, update the version in both `pyproject.toml` and
-`src/nest_st/__init__.py`, rebuild from an empty `dist` directory, and upload the
-new version.
+## 5. Copy the release source into a GitHub checkout
 
-## Recommended automated release
+Do not run `git init` inside `nest_st_package` when the remote repository
+already exists. Clone a clean checkout beside it:
 
-The included `.github/workflows/publish.yml` supports PyPI Trusted Publishing.
-After pushing the package to GitHub:
+```bat
+cd /d F:\NEST\raw_code
+git clone https://github.com/lty10086/NEST.git NEST_GitHub
+```
 
-1. In PyPI, open **nest-st > Manage > Publishing**.
-2. Add a GitHub publisher for owner `lty10086`, repository `NEST`, workflow
-   `publish.yml`, and environment `pypi`.
-3. In GitHub, create the `pypi` environment and optionally require approval.
-4. Publish a GitHub Release; the workflow builds and uploads without a stored
-   long-lived token.
+If `NEST_GitHub` already exists, update it instead:
 
+```bat
+cd /d F:\NEST\raw_code\NEST_GitHub
+git switch main
+git pull origin main
+```
+
+Copy only maintained source files; this preserves remote-only folders such as
+`Databases`:
+
+```bat
+xcopy /E /I /Y "F:\NEST\raw_code\nest_st_package\src\nest_st" "F:\NEST\raw_code\NEST_GitHub\src\nest_st"
+xcopy /E /I /Y "F:\NEST\raw_code\nest_st_package\tests" "F:\NEST\raw_code\NEST_GitHub\tests"
+if not exist "F:\NEST\raw_code\NEST_GitHub\.github\workflows" mkdir "F:\NEST\raw_code\NEST_GitHub\.github\workflows"
+copy /Y "F:\NEST\raw_code\nest_st_package\.github\workflows\publish.yml" "F:\NEST\raw_code\NEST_GitHub\.github\workflows\publish.yml"
+copy /Y "F:\NEST\raw_code\nest_st_package\pyproject.toml" "F:\NEST\raw_code\NEST_GitHub\pyproject.toml"
+copy /Y "F:\NEST\raw_code\nest_st_package\README.md" "F:\NEST\raw_code\NEST_GitHub\README.md"
+copy /Y "F:\NEST\raw_code\nest_st_package\PUBLISHING.md" "F:\NEST\raw_code\NEST_GitHub\PUBLISHING.md"
+copy /Y "F:\NEST\raw_code\nest_st_package\LICENSE" "F:\NEST\raw_code\NEST_GitHub\LICENSE"
+copy /Y "F:\NEST\raw_code\nest_st_package\.gitignore" "F:\NEST\raw_code\NEST_GitHub\.gitignore"
+
+cd /d F:\NEST\raw_code\NEST_GitHub
+git status
+git diff --check
+git add src tests .github pyproject.toml README.md PUBLISHING.md LICENSE .gitignore
+git commit -m "Release nest-st 0.2.1"
+git push origin main
+git tag -a v0.2.1 -m "nest-st 0.2.1"
+git push origin v0.2.1
+```
+
+## 6. Recommended GitHub Trusted Publishing path
+
+The workflow `.github/workflows/publish.yml` builds and uploads when a GitHub
+Release is published. Configure PyPI once:
+
+1. Open **PyPI > nest-st > Manage > Publishing**.
+2. Add owner `lty10086`, repository `NEST`, workflow `publish.yml`, and
+   environment `pypi`.
+3. Create the `pypi` environment in the GitHub repository settings.
+4. Push the source and tag `v0.2.1` as shown above.
+5. Publish a GitHub Release for `v0.2.1`.
+
+Choose either Trusted Publishing or the manual Twine upload for a release; do
+not run both, because PyPI rejects duplicate version files.

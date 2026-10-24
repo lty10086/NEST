@@ -1,7 +1,6 @@
-"""Unified NEST implementation for gene completion and dropout recovery.
+"""NEST with two independent implementations selected only by ``mode``.
 
-The implementation combines the two original research scripts behind one public
-interface while keeping the task-specific data assumptions explicit:
+The public API is shared, but the research workflows are not merged internally:
 
 * ``missing_gene`` uses a matched scRNA-seq reference, cross-modal mapping and
   gene-domain correction before graph-guided reconstruction.
@@ -35,7 +34,8 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.neighbors import LocalOutlierFactor, NearestNeighbors
 from torch.utils.checkpoint import checkpoint
 from torch_geometric.nn import GCNConv
-from torch_geometric.utils import add_self_loops
+from torch_geometric.data import Data
+from torch_geometric.utils import add_self_loops, dense_to_sparse
 
 Mode = Literal["missing_gene", "dropout"]
 LOGGER = logging.getLogger("nest_st")
@@ -43,10 +43,9 @@ LOGGER = logging.getLogger("nest_st")
 
 @dataclass(slots=True)
 class NESTConfig:
-    """Configuration shared by both NEST reconstruction modes.
+    """Public configuration for the two independently implemented modes.
 
-    Parameters left as ``None`` are selected from the input dimensions and zero
-    proportion using the rules from the research implementation.
+    Parameters left as ``None`` are resolved by the selected task branch.
     """
 
     mode: Mode
@@ -232,6 +231,46 @@ def _resolve_config(config: NESTConfig, x: object, n_reference_cells: int) -> _R
         lof_contamination=config.lof_contamination,
         fill_zeros_only=config.fill_zeros_only,
         low_memory=n_obs > config.large_dataset_threshold,
+        map_chunk_size=config.map_chunk_size,
+        gene_chunk_size=config.gene_chunk_size,
+        decomposed_layers=config.decomposed_layers,
+        cpu_threads=config.cpu_threads,
+        random_state=config.random_state,
+        device=_resolve_device(config.device),
+        verbose=config.verbose,
+        zero_rate=rate,
+    )
+
+
+def _resolve_dropout_config(config: NESTConfig, x: object) -> _ResolvedConfig:
+    """Defaults used by Reproduce_Methods.ipynb and NEST_dropout.py.
+
+    Dropout recovery has no zero-rate parameter regimes.  Only KNN size and
+    latent width follow the input dimensions, as in the original reproduction.
+    """
+    rate = _zero_rate(x)
+    n_obs, n_vars = x.shape
+    default_k = max(10, min(30, n_obs // 100))
+    if n_obs > 1:
+        default_k = min(default_k, n_obs - 1)
+    else:
+        default_k = 1
+    return _ResolvedConfig(
+        mode="dropout",
+        spatial_key=config.spatial_key,
+        n_neighbors=config.n_neighbors or default_k,
+        mapping_neighbors=1,
+        gene_neighbors=1,
+        latent_dim=config.latent_dim or max(1, n_vars // 4),
+        n_pcs=config.n_pcs or min(40, max(1, min(n_obs, n_vars) - 1)),
+        learning_rate=config.learning_rate or 1e-3,
+        ae_epochs=config.ae_epochs or 1_000,
+        gae_epochs=config.gae_epochs or 2_000,
+        mse_weight=1.0,
+        leiden_resolution=1.0,
+        lof_contamination=0.3,
+        fill_zeros_only=config.fill_zeros_only,
+        low_memory=False,
         map_chunk_size=config.map_chunk_size,
         gene_chunk_size=config.gene_chunk_size,
         decomposed_layers=config.decomposed_layers,
@@ -523,8 +562,222 @@ def _release_memory() -> None:
         torch.cuda.empty_cache()
 
 
+# ---------------------------------------------------------------------------
+# Dropout branch (kept independent; source: code/NEST_dropout.py)
+# ---------------------------------------------------------------------------
+
+
+class _DropoutAutoEncoder(nn.Module):
+    def __init__(self, input_dim: int, latent_size: int) -> None:
+        super().__init__()
+        hidden_size = max(2, input_dim // 2)
+        self.fc1 = nn.Linear(input_dim, hidden_size)
+        self.layer_norm1 = nn.LayerNorm(hidden_size)
+        self.fc2 = nn.Linear(hidden_size, latent_size)
+        self.layer_norm2 = nn.LayerNorm(latent_size)
+        self.fc3 = nn.Linear(latent_size, hidden_size)
+        self.fc4 = nn.Linear(hidden_size, input_dim)
+
+    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        latent = self.layer_norm2(self.fc2(self.layer_norm1(self.fc1(x))))
+        reconstructed = F.relu(self.fc4(F.relu(self.fc3(latent))))
+        return latent, reconstructed
+
+
+class _DropoutGraphAutoEncoder(nn.Module):
+    def __init__(self, input_dim: int, latent_size: int, n_clusters: int) -> None:
+        super().__init__()
+        hidden_size = max(2, input_dim // 2)
+        self.gc1 = GCNConv(input_dim, hidden_size)
+        self.layer_norm1 = nn.LayerNorm(hidden_size)
+        self.gc2 = GCNConv(hidden_size, latent_size)
+        self.layer_norm2 = nn.LayerNorm(latent_size)
+        self.fc1 = nn.Linear(latent_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, input_dim)
+        self.classifier = nn.Linear(latent_size, n_clusters)
+
+    def forward(
+        self, x: torch.Tensor, edge_index: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        hidden = self.layer_norm1(self.gc1(x, edge_index))
+        latent = self.layer_norm2(self.gc2(hidden, edge_index))
+        reconstructed = F.relu(self.fc2(F.relu(self.fc1(latent))))
+        return latent, reconstructed, self.classifier(latent)
+
+
+def _dropout_dense(x: object) -> np.ndarray:
+    """Return an owning array so dropout preprocessing cannot mutate its input."""
+    if sp.issparse(x):
+        x = x.toarray()
+    return np.array(x, dtype=np.float32, copy=True)
+
+
+def _dropout_train_autoencoder(
+    adata_st: ad.AnnData, cfg: _ResolvedConfig
+) -> np.ndarray:
+    x = torch.tensor(_dropout_dense(adata_st.X), dtype=torch.float32, device=cfg.device)
+    model = _DropoutAutoEncoder(x.shape[1], cfg.latent_dim).to(cfg.device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, betas=(0.9, 0.999))
+    observed = x != 0
+    for epoch in range(cfg.ae_epochs):
+        model.train()
+        optimizer.zero_grad()
+        latent, reconstructed = model(x)
+        loss_mse = F.mse_loss(reconstructed[observed], x[observed])
+        loss_cos = 1 - F.cosine_similarity(
+            reconstructed * observed, x * observed, dim=1
+        ).mean()
+        loss = loss_mse + loss_cos
+        loss.backward()
+        optimizer.step()
+        if cfg.verbose and (epoch == 0 or (epoch + 1) % 500 == 0):
+            LOGGER.info(
+                "dropout AE %d/%d: loss=%.4f, mse=%.4f, cosine=%.4f",
+                epoch + 1, cfg.ae_epochs, loss.item(), loss_mse.item(), loss_cos.item(),
+            )
+    model.eval()
+    with torch.no_grad():
+        latent = model(x)[0].cpu().numpy().astype(np.float32, copy=True)
+    return latent
+
+
+def _dropout_precluster(
+    adata_st: ad.AnnData, cfg: _ResolvedConfig
+) -> tuple[np.ndarray, np.ndarray]:
+    # The copy is part of the original dropout workflow: scaling is used only
+    # for preliminary clustering and must never overwrite reconstruction input.
+    work = adata_st.copy()
+    n_components = min(cfg.n_pcs, min(work.n_obs, work.n_vars) - 1)
+    sc.pp.scale(work, max_value=10)
+    sc.pp.pca(work, n_comps=n_components)
+    sc.pp.neighbors(work, n_neighbors=cfg.n_neighbors, n_pcs=n_components)
+    sc.tl.leiden(work, resolution=1.0)
+    sc.tl.umap(work)
+    labels = work.obs["leiden"].astype("category").cat.codes.to_numpy()
+    return np.asarray(work.obsm["X_umap"], dtype=np.float32).copy(), labels
+
+
+def _dropout_create_cell_network(
+    adata_st: ad.AnnData, cfg: _ResolvedConfig
+) -> tuple[np.ndarray, np.ndarray]:
+    embedding, labels = _dropout_precluster(adata_st, cfg)
+    adata_st.obs["leiden"] = labels
+    outlier_parts: list[np.ndarray] = []
+    for cluster in np.unique(labels):
+        cells = np.flatnonzero(labels == cluster)
+        if len(cells) < 3:
+            continue
+        lof_neighbors = max(1, min(len(cells) - 1, len(cells) // 3))
+        prediction = LocalOutlierFactor(
+            n_neighbors=lof_neighbors, contamination=0.3
+        ).fit_predict(embedding[cells])
+        outlier_parts.append(cells[prediction == -1])
+    outliers = (
+        np.concatenate(outlier_parts)
+        if outlier_parts
+        else np.empty(0, dtype=np.int64)
+    )
+
+    n_obs = adata_st.n_obs
+    k = min(cfg.n_neighbors, n_obs)
+    expression_neighbors = NearestNeighbors(n_neighbors=k).fit(embedding).kneighbors(
+        embedding, return_distance=False
+    )
+    graph = np.zeros((n_obs, n_obs), dtype=np.float32)
+    for i in range(n_obs):
+        for neighbor in expression_neighbors[i]:
+            if i < neighbor and labels[i] == labels[neighbor]:
+                graph[i, neighbor] = 1
+                graph[neighbor, i] = 1
+
+    spatial = np.asarray(adata_st.obsm[cfg.spatial_key], dtype=np.float32)
+    spatial_neighbors = NearestNeighbors(n_neighbors=k).fit(spatial).kneighbors(
+        spatial, return_distance=False
+    )
+    for i in outliers:
+        neighbors = spatial_neighbors[i]
+        neighbors = neighbors[(neighbors != i) & (labels[neighbors] == labels[i])]
+        for neighbor in neighbors:
+            graph[i, neighbor] = 1
+            graph[neighbor, i] = 1
+    return graph, labels
+
+
+def _dropout_train_graph_autoencoder(
+    adata_st: ad.AnnData,
+    graph: np.ndarray,
+    latent_map: np.ndarray,
+    cfg: _ResolvedConfig,
+) -> np.ndarray:
+    edge_index, _ = dense_to_sparse(torch.tensor(graph, dtype=torch.float32))
+    edge_index, _ = add_self_loops(edge_index, num_nodes=graph.shape[0])
+    x = torch.tensor(_dropout_dense(adata_st.X), dtype=torch.float32, device=cfg.device)
+    data = Data(x=x, edge_index=edge_index.to(cfg.device))
+    n_clusters = len(np.unique(adata_st.obs["leiden"]))
+    pseudo_labels = KMeans(n_clusters=n_clusters, n_init=10, random_state=42).fit_predict(
+        latent_map
+    )
+    pseudo_labels = torch.tensor(pseudo_labels, dtype=torch.long, device=cfg.device)
+    model = _DropoutGraphAutoEncoder(x.shape[1], cfg.latent_dim, n_clusters).to(cfg.device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.learning_rate, betas=(0.9, 0.999))
+    observed = data.x != 0
+    for epoch in range(cfg.gae_epochs):
+        model.train()
+        optimizer.zero_grad()
+        _, reconstructed, logits = model(data.x, data.edge_index)
+        loss_mse = F.mse_loss(reconstructed[observed], data.x[observed])
+        loss_cos = 1 - F.cosine_similarity(
+            reconstructed * observed, data.x * observed, dim=1
+        ).mean()
+        loss_cls = F.cross_entropy(logits, pseudo_labels)
+        loss = loss_mse + loss_cos + loss_cls
+        loss.backward()
+        optimizer.step()
+        if cfg.verbose and (epoch == 0 or (epoch + 1) % 500 == 0):
+            LOGGER.info(
+                "dropout GAE %d/%d: loss=%.4f, mse=%.4f, cosine=%.4f, class=%.4f",
+                epoch + 1, cfg.gae_epochs, loss.item(), loss_mse.item(),
+                loss_cos.item(), loss_cls.item(),
+            )
+    model.eval()
+    with torch.no_grad():
+        prediction = model(data.x, data.edge_index)[1].cpu().numpy()
+    return np.asarray(prediction, dtype=np.float32)
+
+
+def _run_dropout_branch(
+    adata_st: ad.AnnData,
+    fill_mask: np.ndarray | None,
+    cfg: _ResolvedConfig,
+) -> tuple[ad.AnnData, np.ndarray, np.ndarray]:
+    original = _dropout_dense(adata_st.X)
+    working = adata_st.copy()
+    working.X = original.copy()
+    latent = _dropout_train_autoencoder(working, cfg)
+    working.obsm["X_latent"] = latent
+    graph, _ = _dropout_create_cell_network(working, cfg)
+    prediction = _dropout_train_graph_autoencoder(working, graph, latent, cfg)
+
+    if fill_mask is not None:
+        mask = np.asarray(fill_mask, dtype=bool)
+        if mask.shape != original.shape:
+            raise ValueError(f"fill_mask must have shape {original.shape}, got {mask.shape}")
+    elif cfg.fill_zeros_only:
+        mask = original == 0
+    else:
+        mask = np.ones_like(original, dtype=bool)
+    output = original.copy()
+    output[mask] = prediction[mask]
+    result = adata_st.copy()
+    result.X = output
+    result.obsm["X_nest_latent"] = latent
+    result.uns["nest_branch"] = "dropout:NEST_dropout.py:fixed_defaults"
+    edge_index = np.vstack(np.nonzero(graph)).astype(np.int64)
+    return result, latent, edge_index
+
+
 class NEST:
-    """Unified NEST estimator.
+    """NEST estimator dispatching to independent task implementations.
 
     Use :meth:`fit_transform` for reconstruction. The fitted instance records
     resolved parameters in ``params_`` and the consensus graph in
@@ -629,34 +882,18 @@ class NEST:
         fill_mask: np.ndarray | None,
         spatial: np.ndarray,
     ) -> ad.AnnData:
-        x = _dense32(adata_st.X)
-        cfg = _resolve_config(self.config, x, adata_st.n_obs)
+        # Do not route dropout through the missing-gene implementation.  This
+        # branch is the original NEST_dropout.py workflow with its own models,
+        # scaled-copy preclustering and non-zero-only reconstruction losses.
+        x = _dropout_dense(adata_st.X)
+        cfg = _resolve_dropout_config(self.config, x)
         self.params_ = cfg
         self.target_genes_ = pd.Index(adata_st.var_names)
         _report_configuration(cfg)
-
-        model, latent = _train_autoencoder(x, cfg)
-        del model
-        _release_memory()
-        labels, edges = _build_consensus_graph(x, x, spatial, cfg)
+        result, latent, edges = _run_dropout_branch(adata_st, fill_mask, cfg)
         self.edge_index_ = edges
-        predictions = _train_graph_autoencoder(
-            x, latent, labels, edges, np.arange(adata_st.n_vars), cfg
-        )
-        if fill_mask is not None:
-            mask = np.asarray(fill_mask, dtype=bool)
-            if mask.shape != x.shape:
-                raise ValueError(f"fill_mask must have shape {x.shape}, got {mask.shape}")
-        elif cfg.fill_zeros_only:
-            mask = x == 0
-        else:
-            mask = np.ones_like(x, dtype=bool)
-        output = x.copy()
-        output[mask] = predictions[mask]
-        result = adata_st.copy()
-        result.X = output
-        result.obsm["X_nest_latent"] = latent
         result.uns["nest"] = _result_metadata(cfg, adata_st.var_names.tolist())
+        result.uns["nest"]["implementation"] = "independent_dropout_fixed_defaults"
         _release_memory()
         return result
 

@@ -1,7 +1,12 @@
 /.venv-build/
 /build/
 /build_check/
+/build_check_*_backup/
 /dist/
+/dist_*_backup/
 /src/*.egg-info/
 **/__pycache__/
 *.py[cod]
+/.pytest_cache/
+/.coverage
+/htmlcov/

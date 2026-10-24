@@ -18,6 +18,10 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-genes", nargs="*", help="Genes to reconstruct in missing_gene mode")
     parser.add_argument("--spatial-key", default="spatial")
     parser.add_argument("--device", default="auto", help="auto, cpu, cuda, or cuda:N")
+    parser.add_argument("--learning-rate", type=float)
+    parser.add_argument("--n-neighbors", type=int)
+    parser.add_argument("--latent-dim", type=int)
+    parser.add_argument("--n-pcs", type=int)
     parser.add_argument("--ae-epochs", type=int)
     parser.add_argument("--gae-epochs", type=int)
     parser.add_argument("--seed", type=int, default=42)
@@ -41,6 +45,10 @@ def main() -> None:
         mode=args.mode,
         spatial_key=args.spatial_key,
         device=args.device,
+        learning_rate=args.learning_rate,
+        n_neighbors=args.n_neighbors,
+        latent_dim=args.latent_dim,
+        n_pcs=args.n_pcs,
         ae_epochs=args.ae_epochs,
         gae_epochs=args.gae_epochs,
         random_state=args.seed,

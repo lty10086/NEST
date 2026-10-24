@@ -3,5 +3,5 @@
 from .nest import NEST, NESTConfig, reconstruct
 
 __all__ = ["NEST", "NESTConfig", "reconstruct"]
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
